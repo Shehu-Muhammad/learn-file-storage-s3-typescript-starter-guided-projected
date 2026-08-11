@@ -1,6 +1,7 @@
 import { getBearerToken, validateJWT } from "../auth";
 import { respondWithJSON } from "./json";
 import { getVideo, updateVideo } from "../db/videos";
+import { getInMemoryURL } from "./assets";
 import type { ApiConfig } from "../config";
 import type { BunRequest } from "bun";
 import { BadRequestError, NotFoundError, UserForbiddenError } from "./errors";
@@ -45,33 +46,45 @@ export async function handlerUploadThumbnail(cfg: ApiConfig, req: BunRequest) {
   const token = getBearerToken(req.headers);
   const userID = validateJWT(token, cfg.jwtSecret);
 
-  console.log("uploading thumbnail for video", videoId, "by user", userID);
+  const video = getVideo(cfg.db, videoId);
+  if (!video) {
+    throw new NotFoundError("Couldn't find video");
+  }
+  if (video.userID !== userID) {
+    throw new UserForbiddenError("Not authorized to update this video");
+  }
 
-  // TODO: implement the upload here
   const formData = await req.formData();
   const file = formData.get("thumbnail");
   if (!(file instanceof File)) {
     throw new BadRequestError("Thumbnail file missing");
   }
 
-  const MAX_UPLOAD_SIZE = 10 << 20; // 10 MB
+  const MAX_UPLOAD_SIZE = 10 << 20;
+
   if (file.size > MAX_UPLOAD_SIZE) {
-    throw new BadRequestError("Thumbnail file too large");
+    throw new BadRequestError(
+      `Thumbnail file exceeds the maximum allowed size of 10MB`,
+    );
   }
 
   const mediaType = file.type;
-  const data = await file.arrayBuffer();
-  const videoMetadata = getVideo(cfg.db, videoId);
-  if (!videoMetadata) {
-    throw new NotFoundError("Couldn't find video");
+  if (!mediaType) {
+    throw new BadRequestError("Missing Content-Type for thumbnail");
   }
-  if (videoMetadata.userID !== userID) {
-    throw new UserForbiddenError("You are not allowed to upload a thumbnail for this video");
-  }
-  videoThumbnails.set(videoId, { data, mediaType });
 
-  const thumbnailURL = `http://localhost:${cfg.port}/api/thumbnails/${videoId}`;
-  const video = {...videoMetadata, thumbnailURL};
+  const fileData = await file.arrayBuffer();
+  if (!fileData) {
+    throw new Error("Error reading file data");
+  }
+
+  videoThumbnails.set(videoId, {
+    data: fileData,
+    mediaType,
+  });
+
+  const urlPath = getInMemoryURL(cfg, videoId);
+  video.thumbnailURL = urlPath;
   updateVideo(cfg.db, video);
 
   return respondWithJSON(200, video);
