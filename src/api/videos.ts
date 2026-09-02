@@ -1,7 +1,7 @@
 import { respondWithJSON } from "./json";
 import { tmpdir } from "os";
 import path from "path";
-import { unlink } from "fs/promises";
+import { rm } from "fs/promises";
 
 import { type ApiConfig } from "../config";
 import type { BunRequest } from "bun";
@@ -51,16 +51,18 @@ export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
   }
 
   const tempFilePath = path.join(tmpdir(), `${videoId}.mp4`);
+  let processedFilePath = "";
   let key = "";
   try {
       await Bun.write(tempFilePath, file);
-      const aspectRatio = await getVideoAspectRatio(tempFilePath);
+      processedFilePath = await processVideoForFastStart(tempFilePath);
+      const aspectRatio = await getVideoAspectRatio(processedFilePath);
       key = `${aspectRatio}/${videoId}.mp4`;
       const s3File = cfg.s3Client.file(key);
-      const bunFile = Bun.file(tempFilePath)
+      const bunFile = Bun.file(processedFilePath);
       await s3File.write(bunFile, {type: mediaType});
   } finally {
-    await unlink(tempFilePath)
+    await Promise.all([rm(processedFilePath, { force: true }), rm(tempFilePath, { force: true })]); 
   }
 
   //https://<bucket-name>.s3.<region>.amazonaws.com/<key>
@@ -71,7 +73,7 @@ export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
 }
 
 export async function getVideoAspectRatio(filePath: string) {
-  const proc = Bun.spawn(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "json", `${filePath}`], {
+  const proc = Bun.spawn(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "json", filePath], {
     stdout: "pipe",
     stderr: "pipe",
   })
@@ -98,4 +100,22 @@ export async function getVideoAspectRatio(filePath: string) {
   } else {
     return "other";
   }
+}
+
+export async function processVideoForFastStart(inputFilePath: string) {
+  const outputFilePath = `${inputFilePath}.processed.mp4`;
+  const proc = Bun.spawn(["ffmpeg", "-i", inputFilePath, "-movflags", "faststart", "-map_metadata", "0", "-codec", "copy", "-f", "mp4", outputFilePath], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+
+  const stdoutText = await new Response(proc.stdout).text();
+  const stderrText = await new Response(proc.stderr).text();
+
+  const exitCode = await proc.exited;
+  if (exitCode !== 0) {
+    throw new Error(stderrText);
+  }
+
+  return outputFilePath;
 }
